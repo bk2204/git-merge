@@ -1,0 +1,244 @@
+= The Git Credential Helper Protocol: What's New?
+:author: brian m. carlson
+:source-highlighter: pygments
+:pygments-style: paraiso-dark
+:revealjs_totalTime: 1200
+
+== What is the credential helper protocol?
+
+* Lets Git use arbitrary backends to get and store credentials securely
+* Can be used to read from the environment using a simple shell script
+* Provides cross-platform framework: works with any operating system
+* Used for HTTP, IMAP, SMTP, and TLS private key credentials.
+
+[.notes]
+--
+Can work with Windows Credential Manager, macOS Keychain, libsecret on Linux, or any password manager you like.
+Not used for SSH.
+--
+
+== How does it work?
+
+* `git credential fill` takes a request on standard input and prints the result on standard output.
+* Each credential helper is queried until both a username and password are found.
+* On success, every credential helper is provided with successful credentials to store via `git credential approve`.
+* On failure, every credential helper is provided with unsuccessful credentials to remove via `git credential reject`.
+
+== What does it look like?
+
+* Fetching credentials pipes the following to stdin of `git credential fill`:
+
+[source,ini]
+----
+protocol=https
+host=example.com
+path=foo.git
+wwwauth[]=Basic realm="example.com"
+----
+
+* Response on stdout:
+
+[source,ini]
+----
+protocol=https
+host=example.com
+path=foo.git
+username=author
+password=veryS3cr3tPassword
+----
+
+== Shortcomings
+
+* Not all authorization schemes have a username and password (e.g., OAuth Bearer).
+* Some authentication schemes require two round-trips (e.g., NTLM and Kerberos).
+* Ephemeral credentials can be stored as long-term.
+* Hard to identify correct credentials when there are several.
+
+[.notes]
+--
+We can use the username for credentials but not all forms of authentication have a username.
+--
+
+== Alternatives (`http.extraheader`)
+
+* Config file has `http.extraHeader` option to add an extra header.
+* Value is static; can't be easily changed.
+* Stores data insecurely in the config file, which is easily leaked.
+* Doesn't always work with Git LFS.
+
+[.notes]
+--
+Leaking repositories is bad, but leaking credentials is worse: long-term access and possibly write access as well.
+--
+
+== Design Improvement and Goals
+
+* Capabilities to identify what functionality a helper or Git supports.
+* Credential helpers can continue to be extremely limited in functionality (e.g., shell one-liners).
+* State to help credential helpers keep track of requests.
+* Ability to operate with multiple round-trips (e.g., NTLM and Kerberos).
+* Flexible enough to work for non-HTTP as well.
+* Supports common major authentication types.
+
+[.notes]
+--
+Non-HTTP not currently supported in this design, but it's a feature we can support in the future.
+NTLM is not recommended, since it uses cryptography known to be insecure since 1995, but some people still want to use it, so this lets them do so without callers needing to know how to use it.
+--
+
+== Bearer Authentication Example
+
+* Fetching credentials:
+
+[source,ini]
+----
+capability[]=authtype
+protocol=https
+host=example.com
+path=foo.git
+wwwauth[]=Bearer
+----
+
+* Response:
+
+[source,ini]
+----
+capability[]=authtype
+protocol=https
+host=example.com
+path=foo.git
+authtype=Bearer
+credential=my-bearer-token
+ephemeral=1
+----
+
+* Equivalent to `Authorization: Bearer my-bearer-token` header.
+
+[.notes]
+--
+For HTTP, we paste together the `authtype` and `credential` fields.
+We use `credential` instead of `password` to avoid accidentally using the already serialized header field as a password on older helpers.
+--
+
+== Advantages
+
+* Example:
+
+[source,ini]
+----
+capability[]=authtype
+protocol=https
+host=example.com
+path=foo.git
+authtype=Bearer
+credential=my-bearer-token
+ephemeral=1
+----
+
+* Capabilities come first for one-pass parsing.
+* Authentication scheme is clearly stated.
+* Credential field can contain arbitrary data appropriate for the protocol (in this case, HTTP).
+* Ephemeral credentials are clearly stated to avoid long-term storage.
+* Using `credential` instead of `password` avoids accidental misuse by older Git.
+
+== Kerberos Authentication Example
+
+* Fetching credentials:
+
+[source,ini]
+----
+capability[]=authtype
+capability[]=state
+protocol=https
+host=example.com
+wwwauth[]=Negotiate
+----
+
+* First response:
+
+[source,ini]
+----
+capability[]=authtype
+capability[]=state
+protocol=https
+host=example.com
+authtype=Negotiate
+credential=YIIDZQY…
+state[]=my-helper:some-internal-state
+continue=1
+ephemeral=1
+----
+
+[.notes]
+--
+Note that we have a `continue=1` response, which means that the helper intends another round trip.
+--
+
+== Kerberos Authentication Example (Continued)
+
+* Fetching credentials (second time):
+
+[source,ini]
+----
+capability[]=authtype
+capability[]=state
+protocol=https
+host=example.com
+wwwauth[]=Negotiate YIIDZQY…
+state[]=my-helper:some-internal-state
+----
+
+* Second response:
+
+[source,ini]
+----
+capability[]=authtype
+capability[]=state
+protocol=https
+host=example.com
+authtype=Negotiate
+credential=oYG3M…
+state[]=my-helper:different-internal-state
+ephemeral=1
+----
+
+[.notes]
+--
+Note that there's no `continue` field, which means that no more round trips are expected.
+--
+
+== Advantages
+
+* Additional round-trips clearly indicated through `continue`.
+* Credential helper can preserve state over multiple rounds or to identify a specific credential.
+* Credential helper can implement effectively arbitrary credential schemes.
+
+== How to Detect Capabilities?
+
+* We need some way to find out what capabilities Git and a helper support.
+* We need to gracefully handle and detect incapable helpers.
+
+== Detecting Capabilities
+
+* Querying capabilities:
+
+[source,shell]
+----
+$ git credential capability
+version 0
+capability authtype
+capability state
+$ git credential-cache capability </dev/null
+version 0
+capability authtype
+----
+
+* Distinct format from helper protocol so that junk from incapable helpers can be detected.
+* Nonzero exit status or missing `version 0` means nothing supported.
+
+== Documentation
+
+* `gitcredentials(7)`
+* `git-credential(1)`
+
+== That's it!
